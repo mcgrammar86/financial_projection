@@ -1,0 +1,328 @@
+"""Monte Carlo runner.
+
+Executes the full annual loop:
+
+  for year in range(n_years):
+      1. Pension + Social Security + salary income
+      2. Mandatory expenses (incl. mortgage P&I + post-payoff lifestyle)
+      3. Planned contributions + 529 withdrawals
+      4. RMDs (forced from pre-tax accounts at age 73+)
+      5. Tax-efficient drawdown for any spending shortfall
+      6. Apply per-account growth via behavior registry
+      7. Aggregate gross/taxable income, compute taxes
+      8. Net taxes against cash; defer 529 credit to year+1
+
+Polars only enters at the end via ``Results.to_polars()``.
+"""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+
+from ..config.loader import load_yaml
+from ..config.schema import (
+    DefinedBenefitAccount,
+    Education529Account,
+    FixedDeferredAccount,
+    Scenario,
+    StochasticAccount,
+)
+from ..engine.accounts import AccountContext, step_accounts
+from ..engine.cashflow import (
+    compute_cashflow_year,
+    planned_529_withdrawals,
+    planned_contributions,
+    salary_for_year,
+)
+from ..engine.mortgage import amortize
+from ..engine.pension import compute_pension_stream
+from ..engine.returns import draw_returns
+from ..engine.rng import make_rng
+from ..engine.social_security import compute_ss_stream
+from ..engine.state import SimState
+from ..engine.withdrawals import (
+    AccountClassification,
+    apply_rmd,
+    classify_accounts,
+    withdraw_for_need,
+)
+from ..tax import engine as tax_engine
+from ..tax.property import project_assessed_values
+
+
+@dataclass
+class Results:
+    scenario: Scenario
+    state: SimState
+    pension_streams: dict[str, np.ndarray]
+    ss_streams: dict[str, np.ndarray]
+    account_idx_map: dict[str, int]
+
+    def to_polars(self) -> pl.DataFrame:
+        nr, ny_plus_1, na = self.state.balances.shape
+        ny = ny_plus_1 - 1
+        names = [None] * na
+        for name, idx in self.account_idx_map.items():
+            names[idx] = name
+        # End-of-year balances
+        end_bal = self.state.balances[:, 1:, :]  # [n_runs, ny, na]
+        run_idx = np.repeat(np.arange(nr), ny * na)
+        year_idx = np.tile(np.repeat(np.arange(ny), na), nr)
+        acc_idx = np.tile(np.arange(na), nr * ny)
+        sim_year = self.scenario.simulation.start_year + year_idx
+        return pl.DataFrame(
+            {
+                "run": run_idx,
+                "sim_year": sim_year,
+                "account": [names[i] for i in acc_idx],
+                "balance": end_bal.reshape(-1),
+                "contribution": self.state.contributions.reshape(-1),
+                "withdrawal": self.state.withdrawals.reshape(-1),
+                "growth": self.state.growth.reshape(-1),
+            }
+        )
+
+    @property
+    def terminal_net_worth(self) -> np.ndarray:
+        return self.state.balances[:, -1, :].sum(axis=1)
+
+
+def run_simulation(scenario: Scenario) -> Results:
+    nr = scenario.simulation.n_runs
+    ny = scenario.n_years
+    start_year = scenario.simulation.start_year
+
+    # Index accounts in a stable order, defined-benefit handled separately.
+    balance_specs = [a for a in scenario.accounts if a.behavior != "defined_benefit"]
+    pension_specs = [a for a in scenario.accounts if a.behavior == "defined_benefit"]
+    account_idx_map = {spec.name: i for i, spec in enumerate(balance_specs)}
+    contexts = [AccountContext(spec=spec, idx=i, base_year=start_year) for i, spec in enumerate(balance_specs)]
+    pretax_specs_by_idx = {
+        i: spec
+        for i, spec in enumerate(balance_specs)
+        if (spec.behavior == "stochastic_market" and getattr(spec, "tax_type", None) == "pre_tax")
+        or (spec.behavior == "fixed_deferred" and not getattr(spec, "is_taxable", True))
+    }
+    person_by_name = {p.name: p for p in scenario.people}
+
+    state = SimState(
+        n_runs=nr, n_years=ny, n_accounts=len(balance_specs), start_year=start_year
+    )
+
+    # Initial balances
+    for spec in balance_specs:
+        idx = account_idx_map[spec.name]
+        state.balances[:, 0, idx] = getattr(spec, "balance_2026", 0.0)
+        if spec.behavior == "stochastic_market" and spec.tax_type == "taxable":
+            # Brokerage cost basis tracked for whole household; sum across taxable accounts.
+            state.cost_basis_brokerage[:, 0] += spec.balance_2026
+
+    # Stochastic returns (we use the first stochastic account's mean/stdev as
+    # the *market* draw; per-account asset weights blend stocks vs bonds).
+    stoch = next((a for a in balance_specs if a.behavior == "stochastic_market"), None)
+    if stoch is None:
+        # Fallback so the engine still runs in stochastic-free scenarios.
+        stocks_mean, stocks_stdev = 0.07, 0.18
+        bonds_mean, bonds_stdev = 0.03, 0.06
+    else:
+        stocks_mean = stoch.stocks_mean
+        stocks_stdev = stoch.stocks_stdev
+        bonds_mean = stoch.bonds_mean
+        bonds_stdev = stoch.bonds_stdev
+    rng = make_rng(scenario.simulation.seed)
+    state.returns_draw = draw_returns(
+        rng,
+        n_runs=nr,
+        n_years=ny,
+        stocks_mean=stocks_mean,
+        stocks_stdev=stocks_stdev,
+        bonds_mean=bonds_mean,
+        bonds_stdev=bonds_stdev,
+        correlation=scenario.simulation.stocks_bonds_correlation,
+    )
+
+    # Mortgage
+    mortgage = amortize(scenario.mortgage, start_year=start_year, n_years=ny)
+
+    # Pre-compute deterministic pension + SS streams
+    pension_streams: dict[str, np.ndarray] = {}
+    for db in pension_specs:
+        assert isinstance(db, DefinedBenefitAccount)
+        person = person_by_name[db.owner]
+        salary_history = np.array(
+            [salary_for_year(person, start_year + t) for t in range(ny)],
+            dtype=np.float64,
+        )
+        pension_streams[db.name] = compute_pension_stream(
+            scenario, db, person, salary_history,
+            n_years=ny, start_year=start_year,
+        )
+
+    ss_streams: dict[str, np.ndarray] = {
+        p.name: compute_ss_stream(
+            p, n_years=ny, start_year=start_year, inflation_rate=scenario.tax.inflation_rate
+        )
+        for p in scenario.people
+    }
+
+    classification = classify_accounts(scenario, account_idx_map)
+
+    # Property tax projection (deterministic, household-level)
+    avs, prop_taxes = project_assessed_values(scenario.house, ny)
+    state.assessed_value[:] = np.array(avs, dtype=np.float64)
+
+    # Year loop
+    for t in range(ny):
+        sim_year = start_year + t
+
+        # 1. Income (deterministic)
+        salary = sum(salary_for_year(p, sim_year) for p in scenario.people)
+        pension = sum(stream[t] for stream in pension_streams.values())
+        ss = sum(stream[t] for stream in ss_streams.values())
+
+        # 2. Expenses (mortgage + lifestyle split)
+        cf = compute_cashflow_year(scenario, sim_year, mortgage, year_index=t)
+        property_tax = prop_taxes[t]
+        total_expenses = (
+            cf.standard_expenses
+            + cf.discretionary_expenses
+            + cf.healthcare_expense
+            + cf.mortgage_p_and_i
+            + property_tax
+        )
+        state.expenses[:, t] = total_expenses
+
+        # 3. Contributions
+        plan = planned_contributions(scenario, sim_year)
+        # Add lifestyle-split brokerage contribution to designated account
+        if mortgage is not None and sim_year >= mortgage.payoff_year:
+            target = scenario.mortgage.lifestyle_split_brokerage_account if scenario.mortgage else None
+            if target is not None and target in account_idx_map:
+                plan[target] = plan.get(target, 0.0) + cf.lifestyle_split_brokerage_contrib
+        for name, amount in plan.items():
+            idx = account_idx_map.get(name)
+            if idx is None:
+                continue
+            state.contributions[:, t, idx] = amount
+
+        # 529 withdrawals (deterministic)
+        for name, amount in planned_529_withdrawals(scenario, sim_year).items():
+            idx = account_idx_map[name]
+            state.withdrawals[:, t, idx] += amount
+
+        # 529 contribution credit accumulates across all 529 accounts this year
+        contributed_529 = sum(
+            v for k, v in plan.items()
+            if any(a.name == k and a.behavior == "education_529_glidepath" for a in scenario.accounts)
+        )
+        contributed_529_arr = np.full(nr, contributed_529, dtype=np.float64)
+
+        # 4. RMDs (forced ordinary income)
+        rmd_per_run = apply_rmd(
+            state, t, scenario, classification, pretax_specs_by_idx, person_by_name
+        )
+
+        # 5. Compute spending need after fixed income; withdraw if needed
+        fixed_income = salary + pension + ss
+        # The runner treats expenses as the cash need for the year,
+        # plus contributions to non-employer-matched accounts.
+        cash_need = total_expenses + sum(plan.values()) - fixed_income
+        cash_need = np.maximum(0.0, cash_need)
+        cash_need_arr = np.full(nr, cash_need, dtype=np.float64)
+        # Subtract RMD already taken (it's cash in hand)
+        net_need = np.maximum(0.0, cash_need_arr - rmd_per_run)
+        ordinary_drawn, ltcg_drawn, _unmet = withdraw_for_need(
+            state, t, net_need, classification
+        )
+
+        # Track Brokerage cost basis: contributions add to basis;
+        # withdrawal handling already deducted basis_consumed in withdraw_for_need.
+        for spec in balance_specs:
+            if spec.behavior == "stochastic_market" and spec.tax_type == "taxable":
+                idx = account_idx_map[spec.name]
+                state.cost_basis_brokerage[:, t] += state.contributions[:, t, idx]
+
+        # 6. Apply growth (after withdrawals/RMD) — balances[:,t+1,...] = ...
+        step_accounts(state, t, contexts)
+
+        # Carry brokerage basis forward — clamp so basis never exceeds balance
+        next_brokerage_balance = np.zeros(nr, dtype=np.float64)
+        for spec in balance_specs:
+            if spec.behavior == "stochastic_market" and spec.tax_type == "taxable":
+                idx = account_idx_map[spec.name]
+                next_brokerage_balance += state.balances[:, t + 1, idx]
+        state.cost_basis_brokerage[:, t + 1] = np.minimum(
+            state.cost_basis_brokerage[:, t], next_brokerage_balance
+        )
+
+        # 7. Aggregate income & taxes
+        ordinary_income = (
+            salary + pension + ss + ordinary_drawn + rmd_per_run
+        )
+        # 401k/457 employee contributions reduce taxable ordinary income
+        pretax_employee_contrib = 0.0
+        for spec in balance_specs:
+            if spec.behavior == "stochastic_market" and spec.tax_type == "pre_tax":
+                # Subtract only the *employee* portion (employer match isn't in salary).
+                employee_portion = max(
+                    0.0, plan.get(spec.name, 0.0) - spec.employer_match_2026
+                    * (1.0 + scenario.tax.inflation_rate) ** (sim_year - 2026)
+                )
+                pretax_employee_contrib += employee_portion
+        ordinary_income = np.maximum(0.0, ordinary_income - pretax_employee_contrib)
+        ltcg_income = ltcg_drawn
+
+        state.gross_income[:, t] = salary + pension + ss + ordinary_drawn + rmd_per_run + ltcg_drawn
+        state.taxable_income[:, t] = ordinary_income + ltcg_income
+        state.ltcg_income[:, t] = ltcg_income
+        state.pension_income[:, t] = pension
+        state.ss_income[:, t] = ss
+
+        deferred_in = state.deferred_state_credit[:, t]
+        result = tax_engine.compute_taxes(
+            scenario,
+            sim_year=sim_year,
+            ordinary_income=ordinary_income,
+            ltcg_income=ltcg_income,
+            deferred_state_credit_in=deferred_in,
+            contributed_to_529_this_year=contributed_529_arr,
+        )
+        state.tax_paid[:, t] = result.total + property_tax
+        state.tax_breakdown["federal"][:, t] = result.federal
+        state.tax_breakdown["oregon"][:, t] = result.oregon
+        state.tax_breakdown["metro_shs"][:, t] = result.metro_shs
+        state.tax_breakdown["property"][:, t] = property_tax
+        state.deferred_state_credit[:, t + 1] = result.deferred_state_credit_next_year
+
+    return Results(
+        scenario=scenario,
+        state=state,
+        pension_streams=pension_streams,
+        ss_streams=ss_streams,
+        account_idx_map=account_idx_map,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    if not argv:
+        print("usage: python -m financial_twin.simulate.runner <config.yaml>")
+        return 2
+    scenario = load_yaml(Path(argv[0]))
+    results = run_simulation(scenario)
+    tw = results.terminal_net_worth
+    p10, p50, p90 = np.percentile(tw, [10, 50, 90])
+    print(f"Terminal net worth (n_runs={scenario.simulation.n_runs}):")
+    print(f"  P10: ${p10:,.0f}")
+    print(f"  P50: ${p50:,.0f}")
+    print(f"  P90: ${p90:,.0f}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

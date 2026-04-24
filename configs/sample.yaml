@@ -1,0 +1,137 @@
+# Financial Twin v2.0 — sample household scenario.
+# Replace TODO values with real numbers. The engine runs end-to-end on these placeholders.
+
+people:
+  - name: husband        # TODO: real first name
+    birth_year: 1985
+    retirement_year: 2050
+    salary_2026: 110000.0
+    salary_growth: 0.025
+    pia_monthly: 2800.0  # TODO: pull from SSA statement
+    ss_claim_age: 67
+
+  - name: wife
+    birth_year: 1986
+    retirement_year: 2046
+    salary_2026: 50000.0       # 20-hr "steady" wage today
+    fte_salary_2026: 100000.0  # what the 40-hr "sprint" pay would be
+    salary_growth: 0.025
+    pia_monthly: 1900.0
+    ss_claim_age: 67
+    wife_phase: steady          # set to "sprint" to model a 5-year FTE finish
+
+accounts:
+  - name: husband_401k
+    behavior: stochastic_market
+    balance_2026: 250000.0
+    tax_type: pre_tax
+    contribution_limit_2026: 24000.0
+    contribution_2026: 22000.0
+    employer_match_2026: 5500.0
+    stocks_weight: 0.85
+    waterfall_priority: 3
+    owner: husband
+
+  - name: husband_457
+    behavior: stochastic_market
+    balance_2026: 80000.0
+    tax_type: pre_tax
+    contribution_limit_2026: 24000.0
+    contribution_2026: 6000.0
+    stocks_weight: 0.85
+    waterfall_priority: 2
+    owner: husband
+
+  - name: family_hsa
+    behavior: stochastic_market
+    balance_2026: 30000.0
+    tax_type: triple_exempt
+    contribution_limit_2026: 8500.0
+    contribution_2026: 8500.0
+    stocks_weight: 0.7
+    waterfall_priority: 1
+    owner: husband
+
+  - name: brokerage
+    behavior: stochastic_market
+    balance_2026: 120000.0
+    tax_type: taxable
+    contribution_limit_2026: 1000000.0
+    contribution_2026: 0.0
+    stocks_weight: 0.8
+    waterfall_priority: 99
+    owner: husband
+
+  - name: husband_tcdrs
+    behavior: fixed_deferred
+    balance_2026: 95000.0
+    annual_rate: 0.07
+    is_taxable: false
+    contribution_2026: 0.0
+    interest_on_jan1_only: true
+
+  - name: hysa
+    behavior: fixed_deferred
+    balance_2026: 50000.0
+    annual_rate: 0.04
+    is_taxable: true
+    contribution_2026: 0.0
+    interest_on_jan1_only: false
+
+  - name: kid1_529
+    behavior: education_529_glidepath
+    balance_2026: 25000.0
+    contribution_2026: 5000.0
+    beneficiary_birth_year: 2018
+    college_start_age: 18
+    annual_tuition_2026: 28000.0
+    college_years: 4
+
+  - name: wife_pers
+    behavior: defined_benefit
+    owner: wife
+    formula_multiplier: 0.015
+    fas_years: 5
+    service_start_year: 2026
+    service_end_year: 2046
+    cola_rate: 0.02
+    survivor_fraction: 0.5
+
+mortgage:
+  principal_remaining_2026: 320000.0
+  annual_rate: 0.035
+  monthly_payment: 1850.0
+  payoff_year: 2046
+  lifestyle_split_brokerage_account: brokerage
+
+house:
+  assessed_value_2026: 450000.0
+  market_value_2026: 700000.0
+  measure50_growth_cap: 0.03
+  millage_rate: 0.015
+  solar_premium_excluded_av: 25000.0  # solar improvement excluded under Measure 50
+
+expenses:
+  standard_annual_2026: 75000.0
+  discretionary_annual_2026: 12000.0
+
+healthcare:
+  bridge_annual_premium_2026: 18000.0
+  medicare_supplement_annual_2026: 6000.0
+
+tax:
+  filing_status: mfj
+  inflation_rate: 0.025
+  metro_shs_threshold_2026: 205000.0
+  metro_shs_rate: 0.01
+  state_credit_529_max: 360.0
+  federal_ltcg_rate: 0.15
+  state_ltcg_as_ordinary: true
+
+simulation:
+  n_runs: 1000
+  start_year: 2026
+  horizon_to_age: 95
+  seed: 20260424
+  stocks_bonds_correlation: 0.05
+  rmd_start_age: 73
