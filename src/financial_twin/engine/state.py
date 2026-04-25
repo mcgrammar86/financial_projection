@@ -20,6 +20,14 @@ class SimState:
     start_year: int
 
     balances: np.ndarray = field(init=False)  # [n_runs, n_years+1, n_accounts]
+    # ``balances`` is mutable scratch space: runner mutates ``balances[:, t, :]``
+    # in-place during apply_rmd / withdraw_for_need at year t, then step_accounts
+    # writes ``balances[:, t+1, :]`` as end-of-year-t. That value is then mutated
+    # again by year t+1's withdrawals. Use ``initial_balances`` and
+    # ``eoy_balances`` for any post-run analytics that need clean, never-mutated
+    # snapshots of starting and end-of-year balances.
+    initial_balances: np.ndarray = field(init=False)  # [n_runs, n_accounts]
+    eoy_balances: np.ndarray = field(init=False)  # [n_runs, n_years, n_accounts]
     contributions: np.ndarray = field(init=False)
     withdrawals: np.ndarray = field(init=False)
     growth: np.ndarray = field(init=False)
@@ -44,6 +52,8 @@ class SimState:
     def __post_init__(self) -> None:
         nr, ny, na = self.n_runs, self.n_years, self.n_accounts
         self.balances = np.zeros((nr, ny + 1, na), dtype=np.float64)
+        self.initial_balances = np.zeros((nr, na), dtype=np.float64)
+        self.eoy_balances = np.zeros((nr, ny, na), dtype=np.float64)
         self.contributions = np.zeros((nr, ny, na), dtype=np.float64)
         self.withdrawals = np.zeros((nr, ny, na), dtype=np.float64)
         self.growth = np.zeros((nr, ny, na), dtype=np.float64)

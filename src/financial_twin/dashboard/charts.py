@@ -71,7 +71,7 @@ def account_balances_stacked(results: Results, percentile: int = 50) -> go.Figur
     Bottom-most (largest terminal-balance) accounts are stacked first so the
     legend reads top-to-bottom in the same order as the visual stack.
     """
-    bal = results.state.balances  # [n_runs, n_years+1, n_accounts]
+    bal = results.balance_history()  # [n_runs, n_years+1, n_accounts]
     pct = np.percentile(bal, percentile, axis=0)  # [n_years+1, n_accounts]
     sim_years = np.arange(
         results.scenario.simulation.start_year,
@@ -106,7 +106,7 @@ def swr_heatmap(results: Results) -> go.Figure:
     X-axis: simulation horizon (years from start).
     Color: probability of portfolio survival up to year t at rate w.
     """
-    bal = results.state.balances.sum(axis=2)  # [n_runs, n_years+1]
+    bal = results.balance_history().sum(axis=2)  # [n_runs, n_years+1]
     inflation = results.scenario.tax.inflation_rate
     initial = bal[:, 0]
     rates = np.linspace(0.01, 0.08, 36)

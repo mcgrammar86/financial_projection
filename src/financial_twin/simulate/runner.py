@@ -69,8 +69,8 @@ class Results:
         names = [None] * na
         for name, idx in self.account_idx_map.items():
             names[idx] = name
-        # End-of-year balances
-        end_bal = self.state.balances[:, 1:, :]  # [n_runs, ny, na]
+        # End-of-year balances (clean, never mutated by next-year withdrawals)
+        end_bal = self.state.eoy_balances  # [n_runs, ny, na]
         run_idx = np.repeat(np.arange(nr), ny * na)
         year_idx = np.tile(np.repeat(np.arange(ny), na), nr)
         acc_idx = np.tile(np.arange(na), nr * ny)
@@ -89,7 +89,20 @@ class Results:
 
     @property
     def terminal_net_worth(self) -> np.ndarray:
-        return self.state.balances[:, -1, :].sum(axis=1)
+        return self.state.eoy_balances[:, -1, :].sum(axis=1)
+
+    def balance_history(self) -> np.ndarray:
+        """Clean per-year balance snapshots, shape ``[n_runs, n_years+1, n_accounts]``.
+
+        Index 0 is start-of-simulation (= ``balance_2026``); index t for t>=1
+        is the true end-of-year-(t-1). Unlike ``state.balances``, this array
+        is never mutated by the year loop's in-place withdrawals.
+        """
+        nr, na = self.state.initial_balances.shape
+        history = np.empty((nr, self.state.eoy_balances.shape[1] + 1, na), dtype=np.float64)
+        history[:, 0, :] = self.state.initial_balances
+        history[:, 1:, :] = self.state.eoy_balances
+        return history
 
 
 def _glide_path(
@@ -162,6 +175,8 @@ def run_simulation(scenario: Scenario) -> Results:
         if spec.behavior == "stochastic_market" and spec.tax_type == "taxable":
             # Brokerage cost basis tracked for whole household; sum across taxable accounts.
             state.cost_basis_brokerage[:, 0] += spec.balance_2026
+    # Snapshot initial balances before the year loop mutates state.balances[:, 0].
+    state.initial_balances[:, :] = state.balances[:, 0, :]
 
     # Stochastic returns (we use the first stochastic account's mean/stdev as
     # the *market* draw; per-account asset weights blend stocks vs bonds).
@@ -292,6 +307,9 @@ def run_simulation(scenario: Scenario) -> Results:
 
         # 6. Apply growth (after withdrawals/RMD) — balances[:,t+1,...] = ...
         step_accounts(state, t, contexts)
+        # Snapshot the true end-of-year balance now, before next year's
+        # apply_rmd / withdraw_for_need mutates balances[:, t+1, :] in place.
+        state.eoy_balances[:, t, :] = state.balances[:, t + 1, :]
 
         # Carry brokerage basis forward — clamp so basis never exceeds balance
         next_brokerage_balance = np.zeros(nr, dtype=np.float64)

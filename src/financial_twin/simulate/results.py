@@ -20,7 +20,7 @@ class FanChart:
 
 
 def net_worth_fan(results: Results) -> FanChart:
-    bal = results.state.balances.sum(axis=2)  # [n_runs, n_years+1]
+    bal = results.balance_history().sum(axis=2)  # [n_runs, n_years+1]
     sim_years = np.arange(
         results.scenario.simulation.start_year,
         results.scenario.simulation.start_year + bal.shape[1],
@@ -34,25 +34,25 @@ def safe_withdrawal_rate(
 ) -> float:
     """Estimate the constant inflation-adjusted SWR (fraction of initial
     portfolio) such that ``success_threshold`` of runs end with > $0."""
-    nr, nyp1, na = results.state.balances.shape
-    initial = results.state.balances[:, 0, :].sum(axis=1)
-    terminal = results.state.balances[:, -1, :].sum(axis=1)
+    history = results.balance_history()  # [n_runs, n_years+1, n_accounts]
+    nr, nyp1, _ = history.shape
+    initial = history[:, 0, :].sum(axis=1)
 
     # Coarse search over candidate withdrawal rates 1%..8%.
     candidates = np.linspace(0.01, 0.08, 36)
     successes = np.zeros_like(candidates)
     inflation = results.scenario.tax.inflation_rate
     n_years = nyp1 - 1
+    bal_total = history.sum(axis=2)  # [n_runs, n_years+1]
     for k, w in enumerate(candidates):
         # Simulate a simple constant-real-withdrawal sweep against the
         # already-realized growth path of the aggregated portfolio.
         # This is an approximation — true SWR re-runs the engine.
-        bal = results.state.balances.sum(axis=2).copy()  # [n_runs, n_years+1]
         broke = np.zeros(nr, dtype=bool)
-        cur = bal[:, 0]
+        cur = bal_total[:, 0].copy()
         for t in range(n_years):
-            growth = bal[:, t + 1] / np.where(bal[:, t] > 0, bal[:, t], 1.0)
-            cur = cur * np.where(bal[:, t] > 0, growth, 1.0)
+            growth = bal_total[:, t + 1] / np.where(bal_total[:, t] > 0, bal_total[:, t], 1.0)
+            cur = cur * np.where(bal_total[:, t] > 0, growth, 1.0)
             real_withdrawal = w * initial * (1.0 + inflation) ** t
             cur = cur - real_withdrawal
             broke |= cur <= 0
@@ -63,7 +63,7 @@ def safe_withdrawal_rate(
 
 
 def ruin_year_distribution(results: Results) -> np.ndarray:
-    bal = results.state.balances.sum(axis=2)
+    bal = results.balance_history().sum(axis=2)
     n_years = bal.shape[1]
     ruin = np.full(bal.shape[0], n_years, dtype=int)
     for t in range(n_years):
@@ -73,7 +73,7 @@ def ruin_year_distribution(results: Results) -> np.ndarray:
 
 
 def max_drawdown(results: Results) -> np.ndarray:
-    bal = results.state.balances.sum(axis=2)
+    bal = results.balance_history().sum(axis=2)
     running_max = np.maximum.accumulate(bal, axis=1)
     dd = (bal - running_max) / np.where(running_max > 0, running_max, 1.0)
     return dd.min(axis=1)

@@ -83,11 +83,13 @@ def main() -> None:
             use_container_width=True,
         )
 
-        # Year-end balances table. Drop the t=0 column (= start-of-2026 initial
-        # balances) so each row is labeled by the year that just *ended*.
+        # Year-end balances table. ``balance_history()`` returns the clean
+        # snapshots (initial + step_accounts outputs) so values aren't
+        # corrupted by next-year in-place withdrawal mutations.
         st.subheader(f"Year-end balances (P{percentile})")
-        bal = results.state.balances  # [n_runs, n_years+1, n_accounts]
-        end_pct = np.percentile(bal[:, 1:, :], percentile, axis=0)  # [n_years, n_accounts]
+        history = results.balance_history()  # [n_runs, n_years+1, n_accounts]
+        # Drop t=0 (= start-of-sim initial balances) so each row labels the year that ended.
+        end_pct = np.percentile(history[:, 1:, :], percentile, axis=0)  # [n_years, n_accounts]
         names_by_idx = [""] * end_pct.shape[1]
         for name, idx in results.account_idx_map.items():
             names_by_idx[idx] = name
@@ -109,14 +111,13 @@ def main() -> None:
             },
         )
 
-        # Per-account drill-down: shows starting balance + contribution +
-        # withdrawal + growth = ending balance, so the year-over-year math
-        # is fully transparent.
+        # Per-account drill-down: starting balance + contribution -
+        # withdrawal + growth = ending balance, with transparent year-by-year math.
         st.subheader("Per-account activity (drill-down)")
         chosen = st.selectbox("Account", names_by_idx, index=0)
         cidx = names_by_idx.index(chosen)
-        starts = np.percentile(bal[:, :-1, cidx], percentile, axis=0)
-        ends = np.percentile(bal[:, 1:, cidx], percentile, axis=0)
+        starts = np.percentile(history[:, :-1, cidx], percentile, axis=0)
+        ends = np.percentile(history[:, 1:, cidx], percentile, axis=0)
         contribs = np.percentile(results.state.contributions[:, :, cidx], percentile, axis=0)
         withdraws = np.percentile(results.state.withdrawals[:, :, cidx], percentile, axis=0)
         growths = np.percentile(results.state.growth[:, :, cidx], percentile, axis=0)
