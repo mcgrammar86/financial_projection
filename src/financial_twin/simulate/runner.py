@@ -197,18 +197,19 @@ def run_simulation(scenario: Scenario) -> Results:
         )
         state.expenses[:, t] = total_expenses
 
-        # 3. Contributions
+        # 3. Contributions: plan is {name: (employee, employer_match)}
         plan = planned_contributions(scenario, sim_year)
         # Add lifestyle-split brokerage contribution to designated account
         if mortgage is not None and sim_year >= mortgage.payoff_year:
             target = scenario.mortgage.lifestyle_split_brokerage_account if scenario.mortgage else None
             if target is not None and target in account_idx_map:
-                plan[target] = plan.get(target, 0.0) + cf.lifestyle_split_brokerage_contrib
-        for name, amount in plan.items():
+                emp, match = plan.get(target, (0.0, 0.0))
+                plan[target] = (emp + cf.lifestyle_split_brokerage_contrib, match)
+        for name, (employee, match) in plan.items():
             idx = account_idx_map.get(name)
             if idx is None:
                 continue
-            state.contributions[:, t, idx] = amount
+            state.contributions[:, t, idx] = employee + match
 
         # 529 withdrawals (deterministic)
         for name, amount in planned_529_withdrawals(scenario, sim_year).items():
@@ -217,7 +218,7 @@ def run_simulation(scenario: Scenario) -> Results:
 
         # 529 contribution credit accumulates across all 529 accounts this year
         contributed_529 = sum(
-            v for k, v in plan.items()
+            employee for k, (employee, _match) in plan.items()
             if any(a.name == k and a.behavior == "education_529_glidepath" for a in scenario.accounts)
         )
         contributed_529_arr = np.full(nr, contributed_529, dtype=np.float64)
@@ -229,9 +230,10 @@ def run_simulation(scenario: Scenario) -> Results:
 
         # 5. Compute spending need after fixed income; withdraw if needed
         fixed_income = salary + pension + ss
-        # The runner treats expenses as the cash need for the year,
-        # plus contributions to non-employer-matched accounts.
-        cash_need = total_expenses + sum(plan.values()) - fixed_income
+        # Cash need: expenses + employee-paid contributions (employer match
+        # comes from outside the household checkbook).
+        employee_outflow = sum(emp for emp, _m in plan.values())
+        cash_need = total_expenses + employee_outflow - fixed_income
         cash_need = np.maximum(0.0, cash_need)
         cash_need_arr = np.full(nr, cash_need, dtype=np.float64)
         # Subtract RMD already taken (it's cash in hand)
@@ -264,16 +266,12 @@ def run_simulation(scenario: Scenario) -> Results:
         ordinary_income = (
             salary + pension + ss + ordinary_drawn + rmd_per_run
         )
-        # 401k/457 employee contributions reduce taxable ordinary income
+        # 401k/457 *employee* pre-tax contributions reduce taxable ordinary income.
         pretax_employee_contrib = 0.0
         for spec in balance_specs:
             if spec.behavior == "stochastic_market" and spec.tax_type == "pre_tax":
-                # Subtract only the *employee* portion (employer match isn't in salary).
-                employee_portion = max(
-                    0.0, plan.get(spec.name, 0.0) - spec.employer_match_2026
-                    * (1.0 + scenario.tax.inflation_rate) ** (sim_year - 2026)
-                )
-                pretax_employee_contrib += employee_portion
+                emp, _match = plan.get(spec.name, (0.0, 0.0))
+                pretax_employee_contrib += emp
         ordinary_income = np.maximum(0.0, ordinary_income - pretax_employee_contrib)
         ltcg_income = ltcg_drawn
 

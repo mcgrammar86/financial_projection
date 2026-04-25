@@ -101,32 +101,51 @@ def compute_cashflow_year(
 
 def planned_contributions(
     scenario: Scenario, sim_year: int
-) -> dict[str, float]:
-    """Return planned contribution by account name for the year (deterministic)."""
+) -> dict[str, tuple[float, float]]:
+    """Return ``{name: (employee, employer_match)}`` for the year.
+
+    Employee portion is the participant's own contribution (subject to
+    pre-tax-income deduction logic in the runner). Employer match is
+    counted toward the account balance but never reduces taxable income.
+    """
     inflation = scenario.tax.inflation_rate
     factor = (1.0 + inflation) ** (sim_year - 2026)
-    contribs: dict[str, float] = {}
+    contribs: dict[str, tuple[float, float]] = {}
     for spec in scenario.accounts:
         if spec.behavior == "stochastic_market":
             assert isinstance(spec, StochasticAccount)
             owner = next((p for p in scenario.people if p.name == spec.owner), None)
             if owner is None or sim_year >= owner.retirement_year:
-                contribs[spec.name] = 0.0
+                contribs[spec.name] = (0.0, 0.0)
                 continue
             cap = spec.contribution_limit_2026 * factor
             planned = min(spec.contribution_2026 * factor, cap)
-            contribs[spec.name] = planned + spec.employer_match_2026 * factor
+            if spec.employer_match_pct > 0.0:
+                owner_salary = salary_for_year(owner, sim_year)
+                cap_pct = (
+                    spec.employer_match_max_pct
+                    if spec.employer_match_max_pct > 0.0
+                    else spec.employer_match_pct
+                )
+                contribution_pct_of_salary = (
+                    planned / owner_salary if owner_salary > 0 else 0.0
+                )
+                effective_pct = min(spec.employer_match_pct, cap_pct, contribution_pct_of_salary)
+                match = owner_salary * effective_pct
+            else:
+                match = spec.employer_match_2026 * factor
+            contribs[spec.name] = (planned, match)
         elif spec.behavior == "fixed_deferred":
             assert isinstance(spec, FixedDeferredAccount)
             growth = (1.0 + spec.contribution_growth) ** (sim_year - 2026)
-            contribs[spec.name] = spec.contribution_2026 * growth
+            contribs[spec.name] = (spec.contribution_2026 * growth, 0.0)
         elif spec.behavior == "education_529_glidepath":
             assert isinstance(spec, Education529Account)
             growth = (1.0 + spec.contribution_growth) ** (sim_year - 2026)
-            contribs[spec.name] = spec.contribution_2026 * growth
+            contribs[spec.name] = (spec.contribution_2026 * growth, 0.0)
         elif spec.behavior == "defined_benefit":
             assert isinstance(spec, DefinedBenefitAccount)
-            contribs[spec.name] = 0.0  # handled by pension stream
+            contribs[spec.name] = (0.0, 0.0)  # handled by pension stream
     return contribs
 
 

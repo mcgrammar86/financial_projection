@@ -62,7 +62,10 @@ class StochasticAccount(BaseModel):
     tax_type: TaxType
     contribution_limit_2026: float
     contribution_2026: float = 0.0
-    employer_match_2026: float = 0.0
+    employer_match_2026: float = 0.0  # flat $ match (used when employer_match_pct == 0)
+    employer_match_pct: float = 0.0  # match expressed as fraction of owner's salary
+    employer_match_max_pct: float = 0.0  # optional cap on % of salary that gets matched
+    vehicle_group: str | None = None  # accounts in the same group share an IRS limit
     stocks_weight: float = Field(0.7, ge=0.0, le=1.0)
     stocks_mean: float = 0.07
     stocks_stdev: float = 0.18
