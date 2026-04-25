@@ -83,20 +83,22 @@ def main() -> None:
             use_container_width=True,
         )
 
+        # Year-end balances table. Drop the t=0 column (= start-of-2026 initial
+        # balances) so each row is labeled by the year that just *ended*.
         st.subheader(f"Year-end balances (P{percentile})")
         bal = results.state.balances  # [n_runs, n_years+1, n_accounts]
-        pct = np.percentile(bal, percentile, axis=0)  # [n_years+1, n_accounts]
-        names_by_idx = [""] * pct.shape[1]
+        end_pct = np.percentile(bal[:, 1:, :], percentile, axis=0)  # [n_years, n_accounts]
+        names_by_idx = [""] * end_pct.shape[1]
         for name, idx in results.account_idx_map.items():
             names_by_idx[idx] = name
-        sim_years = np.arange(
+        end_years = np.arange(
             scenario.simulation.start_year,
-            scenario.simulation.start_year + pct.shape[0],
+            scenario.simulation.start_year + end_pct.shape[0],
         )
-        cols = {"Year": sim_years}
+        cols = {"Year": end_years}
         for idx, name in enumerate(names_by_idx):
-            cols[name] = pct[:, idx]
-        cols["Total"] = pct.sum(axis=1)
+            cols[name] = end_pct[:, idx]
+        cols["Total"] = end_pct.sum(axis=1)
         df = pl.DataFrame(cols)
         money_cols = [c for c in df.columns if c != "Year"]
         st.dataframe(
@@ -105,6 +107,39 @@ def main() -> None:
             column_config={
                 c: st.column_config.NumberColumn(format="$%.0f") for c in money_cols
             },
+        )
+
+        # Per-account drill-down: shows starting balance + contribution +
+        # withdrawal + growth = ending balance, so the year-over-year math
+        # is fully transparent.
+        st.subheader("Per-account activity (drill-down)")
+        chosen = st.selectbox("Account", names_by_idx, index=0)
+        cidx = names_by_idx.index(chosen)
+        starts = np.percentile(bal[:, :-1, cidx], percentile, axis=0)
+        ends = np.percentile(bal[:, 1:, cidx], percentile, axis=0)
+        contribs = np.percentile(results.state.contributions[:, :, cidx], percentile, axis=0)
+        withdraws = np.percentile(results.state.withdrawals[:, :, cidx], percentile, axis=0)
+        growths = np.percentile(results.state.growth[:, :, cidx], percentile, axis=0)
+        activity = pl.DataFrame({
+            "Year": end_years,
+            "Start balance": starts,
+            "Contribution": contribs,
+            "Withdrawal": withdraws,
+            "Growth": growths,
+            "End balance": ends,
+        })
+        st.dataframe(
+            activity,
+            use_container_width=True,
+            column_config={
+                c: st.column_config.NumberColumn(format="$%.0f")
+                for c in activity.columns if c != "Year"
+            },
+        )
+        st.caption(
+            "Note: each column is the per-year P-percentile across runs computed "
+            "independently, so Start + Contribution − Withdrawal + Growth may not "
+            "exactly equal End for any single Monte Carlo path."
         )
 
 
