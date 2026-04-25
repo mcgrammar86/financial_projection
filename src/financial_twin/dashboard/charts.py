@@ -65,6 +65,40 @@ def fan_chart(fan: FanChart) -> go.Figure:
     return fig
 
 
+def account_balances_stacked(results: Results, percentile: int = 50) -> go.Figure:
+    """Stacked area of per-account balances over time at the given percentile.
+
+    Bottom-most (largest terminal-balance) accounts are stacked first so the
+    legend reads top-to-bottom in the same order as the visual stack.
+    """
+    bal = results.state.balances  # [n_runs, n_years+1, n_accounts]
+    pct = np.percentile(bal, percentile, axis=0)  # [n_years+1, n_accounts]
+    sim_years = np.arange(
+        results.scenario.simulation.start_year,
+        results.scenario.simulation.start_year + pct.shape[0],
+    )
+    names_by_idx = [""] * pct.shape[1]
+    for name, idx in results.account_idx_map.items():
+        names_by_idx[idx] = name
+    order = np.argsort(-pct[-1, :])  # largest terminal balance first
+    fig = go.Figure()
+    for idx in order:
+        fig.add_trace(go.Scatter(
+            x=sim_years,
+            y=pct[:, idx],
+            name=names_by_idx[idx],
+            stackgroup="one",
+            mode="lines",
+            hovertemplate="%{y:$,.0f}<extra>%{fullData.name}</extra>",
+        ))
+    fig.update_layout(
+        yaxis_title="Balance ($)",
+        xaxis_title="Year",
+        hovermode="x unified",
+    )
+    return fig
+
+
 def swr_heatmap(results: Results) -> go.Figure:
     """SWR vs Pension Gap heatmap.
 
