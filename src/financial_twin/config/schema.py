@@ -197,6 +197,28 @@ class Scenario(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_account_owners(self) -> "Scenario":
+        """Every account that declares ``owner`` must name a real Person.
+
+        Without this, ``planned_contributions`` and the pension stream
+        builder silently treat orphaned accounts as having no owner --
+        zeroing all employee contributions for that account. The most
+        common cause is renaming a Person without updating the
+        ``owner:`` lines on their accounts.
+        """
+        person_names = {p.name for p in self.people}
+        for spec in self.accounts:
+            owner = getattr(spec, "owner", None)
+            if owner is None:
+                continue
+            if owner not in person_names:
+                raise ValueError(
+                    f"account '{spec.name}' references unknown owner "
+                    f"'{owner}'; valid Person names are {sorted(person_names)}."
+                )
+        return self
+
+    @model_validator(mode="after")
     def _enforce_vehicle_group_limits(self) -> "Scenario":
         """Stochastic accounts in the same `vehicle_group` share an IRS cap.
 
