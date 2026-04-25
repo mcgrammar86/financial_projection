@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ..config.schema import Scenario
-from ..simulate.runner import Results, run_simulation
+from financial_twin.config.schema import Scenario
+from financial_twin.simulate.runner import Results, run_simulation
 
 
 @st.cache_data(hash_funcs={Scenario: lambda s: s.config_hash})

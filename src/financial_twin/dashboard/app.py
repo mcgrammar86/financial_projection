@@ -12,9 +12,9 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 
-from ..config.loader import load_yaml
-from ..simulate import results as result_mod
-from . import cache, charts
+from financial_twin.config.loader import load_yaml
+from financial_twin.simulate import results as result_mod
+from financial_twin.dashboard import cache, charts
 
 
 def parse_args() -> argparse.Namespace:

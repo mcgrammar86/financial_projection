@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
-from ..simulate.results import FanChart
-from ..simulate.runner import Results
+from financial_twin.simulate.results import FanChart
+from financial_twin.simulate.runner import Results
 
 
 def income_sankey(results: Results, year_index: int) -> go.Figure:
