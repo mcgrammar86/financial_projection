@@ -33,7 +33,9 @@ people:
     wife_phase: steady           # set to "sprint" to model a 5-year FTE finish
 
 accounts:
-  # ---- Husband 401k (split between Traditional and Roth) ----
+  # ---- Husband 401k (Target-Date Fund glide; Traditional + Roth share IRS cap) ----
+  # The validator enforces traditional + Roth contribution_2026 <= contribution_limit_2026.
+  # Both halves are in the same TDF and de-risk together toward retirement.
   - name: husband_401k_traditional
     behavior: stochastic_market
     balance_2026: 220000.0       # TODO
@@ -43,7 +45,9 @@ accounts:
     employer_match_pct: 0.05     # 5% of salary; employer match always lands here
     employer_match_max_pct: 0.05
     vehicle_group: husband_401k
-    stocks_weight: 0.85
+    stocks_weight: 0.90                       # TDF starts aggressive
+    stocks_weight_glide_target: 0.40          # de-risks to 40/60 by retirement
+    stocks_weight_glide_target_year: 2050     # = husband.retirement_year
     waterfall_priority: 3
     owner: husband
 
@@ -54,11 +58,13 @@ accounts:
     contribution_limit_2026: 24000.0   # shared with traditional half
     contribution_2026: 6000.0    # TODO: Roth portion you contribute
     vehicle_group: husband_401k
-    stocks_weight: 0.85
+    stocks_weight: 0.90
+    stocks_weight_glide_target: 0.40
+    stocks_weight_glide_target_year: 2050
     waterfall_priority: 3
     owner: husband
 
-  # ---- Wife 457 (split between Traditional and Roth) ----
+  # ---- Wife 457 (Target-Date Fund glide; Traditional + Roth share IRS cap) ----
   - name: wife_457_traditional
     behavior: stochastic_market
     balance_2026: 60000.0        # TODO
@@ -68,7 +74,9 @@ accounts:
     employer_match_pct: 0.04     # TODO: 457 match if any
     employer_match_max_pct: 0.04
     vehicle_group: wife_457
-    stocks_weight: 0.8
+    stocks_weight: 0.85
+    stocks_weight_glide_target: 0.40
+    stocks_weight_glide_target_year: 2046     # = wife.retirement_year
     waterfall_priority: 2
     owner: wife
 
@@ -79,7 +87,9 @@ accounts:
     contribution_limit_2026: 24000.0
     contribution_2026: 2000.0    # TODO
     vehicle_group: wife_457
-    stocks_weight: 0.8
+    stocks_weight: 0.85
+    stocks_weight_glide_target: 0.40
+    stocks_weight_glide_target_year: 2046
     waterfall_priority: 2
     owner: wife
 

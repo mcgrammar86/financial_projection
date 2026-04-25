@@ -30,6 +30,9 @@ class AccountContext:
     spec: AccountSpec
     idx: int  # column in balances array
     base_year: int  # scenario.simulation.start_year
+    # Per-year stocks weight for stochastic accounts (TDF glide path).
+    # None = use spec.stocks_weight as a static value.
+    stocks_weight_by_year: np.ndarray | None = None
 
 
 class GrowthFn(Protocol):
@@ -58,10 +61,19 @@ def _fixed_deferred(state: SimState, year: int, ctx: AccountContext) -> None:
 
 
 def _stochastic_market(state: SimState, year: int, ctx: AccountContext) -> None:
-    """401k/457/HSA/Brokerage growth: balance * (1 + blended return)."""
+    """401k/457/HSA/Brokerage growth: balance * (1 + blended return).
+
+    When ``ctx.stocks_weight_by_year`` is provided (TDF glide path), the
+    stocks/bonds blend uses the year-specific weight; otherwise the
+    spec's static ``stocks_weight`` is used.
+    """
     spec: StochasticAccount = ctx.spec  # type: ignore[assignment]
     market = state.returns_draw[:, year, :]  # [n_runs, 2]
-    r = blend_account_return(market, spec.stocks_weight)
+    if ctx.stocks_weight_by_year is not None:
+        weight = float(ctx.stocks_weight_by_year[year])
+    else:
+        weight = spec.stocks_weight
+    r = blend_account_return(market, weight)
     jan1 = state.balances[:, year, ctx.idx]
     contrib = state.contributions[:, year, ctx.idx]
     # Mid-year contribution convention: contributions earn half a year of return.

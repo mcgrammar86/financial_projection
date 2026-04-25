@@ -66,7 +66,13 @@ class StochasticAccount(BaseModel):
     employer_match_pct: float = 0.0  # match expressed as fraction of owner's salary
     employer_match_max_pct: float = 0.0  # optional cap on % of salary that gets matched
     vehicle_group: str | None = None  # accounts in the same group share an IRS limit
-    stocks_weight: float = Field(0.7, ge=0.0, le=1.0)
+    stocks_weight: float = Field(0.7, ge=0.0, le=1.0)  # initial / static weight
+    # Target-date glide path: when both glide fields are set, the engine
+    # linearly interpolates `stocks_weight` -> `stocks_weight_glide_target`
+    # from `start_year` to `stocks_weight_glide_target_year` (defaults to
+    # the owner's retirement_year), and holds at the target afterward.
+    stocks_weight_glide_target: float | None = Field(default=None, ge=0.0, le=1.0)
+    stocks_weight_glide_target_year: int | None = None
     stocks_mean: float = 0.07
     stocks_stdev: float = 0.18
     bonds_mean: float = 0.03
@@ -188,6 +194,40 @@ class Scenario(BaseModel):
             self.simulation.end_year = youngest_birth + self.simulation.horizon_to_age
         if self.simulation.end_year < self.simulation.start_year + 1:
             raise ValueError("end_year must be at least start_year+1")
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_vehicle_group_limits(self) -> "Scenario":
+        """Stochastic accounts in the same `vehicle_group` share an IRS cap.
+
+        All members must declare the same `contribution_limit_2026`, and the
+        sum of `contribution_2026` across the group must not exceed it.
+        Employer match is excluded from the participant cap.
+        """
+        groups: dict[str, list[StochasticAccount]] = {}
+        for spec in self.accounts:
+            if spec.behavior != "stochastic_market":
+                continue
+            assert isinstance(spec, StochasticAccount)
+            if spec.vehicle_group is None:
+                continue
+            groups.setdefault(spec.vehicle_group, []).append(spec)
+        for group_name, members in groups.items():
+            limits = {m.contribution_limit_2026 for m in members}
+            if len(limits) > 1:
+                raise ValueError(
+                    f"vehicle_group '{group_name}': members declare conflicting "
+                    f"contribution_limit_2026 values {sorted(limits)}; they must match."
+                )
+            limit = next(iter(limits))
+            total = sum(m.contribution_2026 for m in members)
+            if total > limit + 1e-9:
+                names = ", ".join(m.name for m in members)
+                raise ValueError(
+                    f"vehicle_group '{group_name}': combined contribution_2026 "
+                    f"({total:.2f}) exceeds shared IRS limit ({limit:.2f}) "
+                    f"across [{names}]."
+                )
         return self
 
     @field_validator("people")

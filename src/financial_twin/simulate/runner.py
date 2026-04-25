@@ -92,6 +92,39 @@ class Results:
         return self.state.balances[:, -1, :].sum(axis=1)
 
 
+def _glide_path(
+    spec, scenario: Scenario, n_years: int
+) -> np.ndarray | None:
+    """Per-year stocks weight for a stochastic account, or None if static.
+
+    Linearly interpolates from ``spec.stocks_weight`` (at start_year) to
+    ``spec.stocks_weight_glide_target`` at ``stocks_weight_glide_target_year``
+    (defaults to the owner's retirement_year). Held flat after the target.
+    """
+    if spec.behavior != "stochastic_market":
+        return None
+    target = getattr(spec, "stocks_weight_glide_target", None)
+    if target is None:
+        return None
+    target_year = spec.stocks_weight_glide_target_year
+    if target_year is None:
+        owner = next((p for p in scenario.people if p.name == spec.owner), None)
+        if owner is None:
+            return None
+        target_year = owner.retirement_year
+    start_year = scenario.simulation.start_year
+    glide_years = max(1, target_year - start_year)
+    weights = np.empty(n_years, dtype=np.float64)
+    for t in range(n_years):
+        sim_year = start_year + t
+        if sim_year >= target_year:
+            weights[t] = target
+        else:
+            frac = (sim_year - start_year) / glide_years
+            weights[t] = spec.stocks_weight + frac * (target - spec.stocks_weight)
+    return weights
+
+
 def run_simulation(scenario: Scenario) -> Results:
     nr = scenario.simulation.n_runs
     ny = scenario.n_years
@@ -101,7 +134,15 @@ def run_simulation(scenario: Scenario) -> Results:
     balance_specs = [a for a in scenario.accounts if a.behavior != "defined_benefit"]
     pension_specs = [a for a in scenario.accounts if a.behavior == "defined_benefit"]
     account_idx_map = {spec.name: i for i, spec in enumerate(balance_specs)}
-    contexts = [AccountContext(spec=spec, idx=i, base_year=start_year) for i, spec in enumerate(balance_specs)]
+    contexts = [
+        AccountContext(
+            spec=spec,
+            idx=i,
+            base_year=start_year,
+            stocks_weight_by_year=_glide_path(spec, scenario, ny),
+        )
+        for i, spec in enumerate(balance_specs)
+    ]
     pretax_specs_by_idx = {
         i: spec
         for i, spec in enumerate(balance_specs)
