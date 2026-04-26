@@ -27,6 +27,21 @@ ClaimAge = Literal[62, 63, 64, 65, 66, 67, 68, 69, 70]
 WifePhase = Literal["steady", "sprint"]
 
 
+class PretaxBenefit(BaseModel):
+    """Pre-tax payroll deduction (health insurance, dental, FSA, etc.).
+
+    Reduces both take-home cash AND taxable income for federal/Oregon
+    purposes (Section 125 cafeteria-plan style). Stops at the owner's
+    retirement_year by default since employer-sponsored benefits typically
+    end with employment.
+    """
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    amount_2026: float
+    growth: float = 0.05  # healthcare inflation default
+    stops_at_retirement: bool = True
+
+
 class Person(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
@@ -39,6 +54,7 @@ class Person(BaseModel):
     ss_claim_age: ClaimAge = 67
     death_year: int | None = None  # for survivor-benefit modeling
     wife_phase: WifePhase = "steady"  # only meaningful for the pensioner
+    pretax_benefits: list[PretaxBenefit] = Field(default_factory=list)
 
 
 class FixedDeferredAccount(BaseModel):

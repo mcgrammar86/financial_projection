@@ -21,6 +21,12 @@ people:
     salary_growth: 0.025
     pia_monthly: 2800.0    # TODO: pull from SSA statement
     ss_claim_age: 67
+    # Pre-tax payroll deductions (Section 125): reduce both take-home cash
+    # AND taxable income for federal/Oregon. Stops at retirement_year by
+    # default. Use real 2026 dollar costs; growth is benefit-cost inflation.
+    pretax_benefits:
+      - {name: health_insurance, amount_2026: 4800.0, growth: 0.06}  # TODO
+      - {name: dental_vision,    amount_2026: 600.0,  growth: 0.05}  # TODO
 
   - name: wife
     birth_year: 1986

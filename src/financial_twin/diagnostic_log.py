@@ -25,6 +25,7 @@ from .engine.cashflow import (
     compute_cashflow_year,
     planned_529_withdrawals,
     planned_contributions,
+    pretax_benefits_for_year,
     salary_for_year,
 )
 from .engine.mortgage import amortize
@@ -90,6 +91,15 @@ def _dump_year(scenario: Scenario, results, mortgage, t: int, out: TextIO) -> No
     print(f"  {'TOTAL pension':30s}                    = {_money(pension_total)}", file=out)
     print(f"  {'TOTAL social_security':30s}                    = {_money(ss_total)}", file=out)
 
+    # --- Pre-tax payroll deductions (health, FSA, etc.) ---
+    pretax_total = 0.0
+    for p in scenario.people:
+        v = pretax_benefits_for_year(p, sim_year)
+        pretax_total += v
+        if v > 0 or p.pretax_benefits:
+            print(f"  {p.name:30s} pretax_benefits    = {_money(v)}", file=out)
+    print(f"  {'TOTAL pretax benefits':30s}                    = {_money(pretax_total)}", file=out)
+
     # --- Cashflow / expenses ---
     cf = compute_cashflow_year(scenario, sim_year, mortgage, year_index=t)
     print("\n[Expenses]", file=out)
@@ -98,6 +108,7 @@ def _dump_year(scenario: Scenario, results, mortgage, t: int, out: TextIO) -> No
     print(f"  healthcare_expense                    = {_money(cf.healthcare_expense)}", file=out)
     print(f"  mortgage_p_and_i                      = {_money(cf.mortgage_p_and_i)}", file=out)
     print(f"  property_tax                          = {_money(float(state.tax_breakdown['property'][0, t]))}", file=out)
+    print(f"  pretax_payroll_benefits               = {_money(pretax_total)}", file=out)
     print(f"  lifestyle_split_brokerage_contrib     = {_money(cf.lifestyle_split_brokerage_contrib)}", file=out)
     print(f"  TOTAL expenses (state.expenses)       = {_money(float(state.expenses[0, t]))}", file=out)
 
@@ -154,6 +165,29 @@ def _dump_year(scenario: Scenario, results, mortgage, t: int, out: TextIO) -> No
     print(f"  metro_shs_tax                         = {_money(float(state.tax_breakdown['metro_shs'][0, t]))}", file=out)
     print(f"  property_tax                          = {_money(float(state.tax_breakdown['property'][0, t]))}", file=out)
     print(f"  total_tax_paid                        = {_money(float(state.tax_paid[0, t]))}", file=out)
+    print(f"  tax_iterations_to_converge            = {int(state.tax_iterations[t])}", file=out)
+
+    # --- Cashflow reconciliation ---
+    salary_total = sum(salary_for_year(p, sim_year) for p in scenario.people)
+    pension_total = sum(float(stream[t]) for stream in results.pension_streams.values())
+    ss_total = sum(float(stream[t]) for stream in results.ss_streams.values())
+    drawn_total = float(state.withdrawals[0, t, :].sum())
+    employee_total = float(state.contributions[0, t, :].sum())
+    income_in = salary_total + pension_total + ss_total + drawn_total
+    cash_out = (
+        float(state.expenses[0, t])
+        + float(state.tax_breakdown["federal"][0, t])
+        + float(state.tax_breakdown["oregon"][0, t])
+        + float(state.tax_breakdown["metro_shs"][0, t])
+        + employee_total
+        + pretax_total
+    )
+    surplus = income_in - cash_out
+    print("\n[Cashflow reconciliation]", file=out)
+    print(f"  IN  (salary + pension + SS + withdrawals)  = {_money(income_in)}", file=out)
+    print(f"  OUT (expenses + income tax + employee contribs + pretax benefits)", file=out)
+    print(f"                                             = {_money(cash_out)}", file=out)
+    print(f"  Surplus (IN - OUT)                          = {_money(surplus)}", file=out)
     print(file=out)
 
 

@@ -17,6 +17,7 @@ from financial_twin.config.loader import load_yaml
 from financial_twin.engine.cashflow import (
     compute_cashflow_year,
     planned_529_withdrawals,
+    pretax_benefits_for_year,
     salary_for_year,
 )
 from financial_twin.engine.mortgage import amortize
@@ -42,12 +43,12 @@ def _build_cashflow_table(scenario, results, percentile: int) -> pl.DataFrame:
     The Surplus/Gap column reconciles money in vs money out:
       In  = Salary + Pension + SS + Drawn (pretax) + Drawn (taxable) + Drawn (Roth/HSA)
       Out = Standard + Discretionary + Healthcare + Mortgage + PropertyTax
-            + Federal + Oregon + MetroSHS + EmployeeContribs
+            + Federal + Oregon + MetroSHS + EmployeeContribs + PretaxBenefits
       Surplus = In - Out
-    A persistently positive Surplus means cash that the engine doesn't
-    route anywhere (no auto-savings); a negative Surplus that doesn't
-    show up as additional withdrawals means tax obligations aren't
-    being funded by the cashflow loop.
+    The runner iterates cash_need ↔ withdraw ↔ tax until tax converges,
+    so at P50 the surplus should be ~0 every year. Non-zero residuals at
+    other percentiles are from the percentile mix (each column percentile
+    computed independently), not engine error.
     """
     state = results.state
     ny = scenario.n_years
@@ -82,12 +83,13 @@ def _build_cashflow_table(scenario, results, percentile: int) -> pl.DataFrame:
     brokerage_drawn = _pct_sum(classification.brokerage_idx)
     roth_drawn = _pct_sum(classification.roth_or_hsa_idx)
 
-    # --- Expenses + mortgage (deterministic) ---
+    # --- Expenses + mortgage + pretax benefits (deterministic) ---
     standard = np.zeros(ny, dtype=np.float64)
     discretionary = np.zeros(ny, dtype=np.float64)
     healthcare = np.zeros(ny, dtype=np.float64)
     mortgage_pi = np.zeros(ny, dtype=np.float64)
     lifestyle_split = np.zeros(ny, dtype=np.float64)
+    pretax_benefits = np.zeros(ny, dtype=np.float64)
     for t in range(ny):
         cf = compute_cashflow_year(scenario, start_year + t, mortgage, year_index=t)
         standard[t] = cf.standard_expenses
@@ -95,6 +97,9 @@ def _build_cashflow_table(scenario, results, percentile: int) -> pl.DataFrame:
         healthcare[t] = cf.healthcare_expense
         mortgage_pi[t] = cf.mortgage_p_and_i
         lifestyle_split[t] = cf.lifestyle_split_brokerage_contrib
+        pretax_benefits[t] = sum(
+            pretax_benefits_for_year(p, start_year + t) for p in scenario.people
+        )
 
     # --- Taxes (stochastic except property which is deterministic) ---
     federal = np.percentile(state.tax_breakdown["federal"], percentile, axis=0)
@@ -118,6 +123,7 @@ def _build_cashflow_table(scenario, results, percentile: int) -> pl.DataFrame:
         standard + discretionary + healthcare + mortgage_pi + property_tax
         + federal + oregon + shs
         + employee
+        + pretax_benefits
     )
     surplus = income_in - cash_out
 
@@ -135,6 +141,7 @@ def _build_cashflow_table(scenario, results, percentile: int) -> pl.DataFrame:
         "Healthcare": healthcare,
         "Mortgage P&I": mortgage_pi,
         "Property tax": property_tax,
+        "Pretax benefits": pretax_benefits,
         "Federal tax": federal,
         "Oregon tax": oregon,
         "Metro SHS": shs,
@@ -341,6 +348,7 @@ def _render_cashflow_tab(scenario, results) -> None:
             ("Healthcare", row["Healthcare"]),
             ("Mortgage P&I", row["Mortgage P&I"]),
             ("Property tax", row["Property tax"]),
+            ("Pretax payroll benefits", row["Pretax benefits"]),
         ])
     with col_right:
         _section("Income taxes", [
@@ -361,18 +369,13 @@ def _render_cashflow_tab(scenario, results) -> None:
         f"Income IN ${row['Income IN']:,.0f}  −  Cash OUT ${row['Cash OUT']:,.0f}  "
         f"= :{color}[**${surplus:,.0f} surplus**]"
     )
-    if surplus > 1.0:
-        st.warning(
-            "Positive surplus = pre-tax cash that the engine doesn't route "
-            "anywhere. The household effectively spends/loses it. To capture "
-            "it, increase planned contributions or add a brokerage savings line."
-        )
-    elif surplus < -1.0:
-        st.warning(
-            "Negative surplus that doesn't show up as additional withdrawals "
-            "means tax obligations aren't fully funded by the cashflow loop. "
-            "(The engine's cash_need calculation includes property tax but not "
-            "income taxes — they're computed and recorded but not deducted.)"
+    if abs(surplus) > 100.0:
+        # Cashflow loop iterates to convergence so any residual is from
+        # the percentile mixing across columns, not from the engine.
+        st.info(
+            "Each column is the per-year P-percentile across runs computed "
+            "independently, so the IN/OUT totals don't have to reconcile "
+            "exactly at non-50 percentiles. Switch to P50 for the cleanest read."
         )
 
 

@@ -37,6 +37,7 @@ from ..engine.cashflow import (
     compute_cashflow_year,
     planned_529_withdrawals,
     planned_contributions,
+    pretax_benefits_for_year,
     salary_for_year,
 )
 from ..engine.mortgage import amortize
@@ -281,23 +282,91 @@ def run_simulation(scenario: Scenario) -> Results:
         )
         contributed_529_arr = np.full(nr, contributed_529, dtype=np.float64)
 
-        # 4. RMDs (forced ordinary income)
+        # 4. RMDs (forced ordinary income) -- run once before the iteration.
         rmd_per_run = apply_rmd(
             state, t, scenario, classification, pretax_specs_by_idx, person_by_name
         )
 
-        # 5. Compute spending need after fixed income; withdraw if needed
+        # Pre-tax payroll deductions (health insurance, FSA, etc.): a cash
+        # outflow that ALSO reduces taxable ordinary income (Section 125 /
+        # cafeteria-plan style). Deterministic per year.
+        pretax_benefits_total = sum(
+            pretax_benefits_for_year(p, sim_year) for p in scenario.people
+        )
+        state.pretax_benefits[:, t] = pretax_benefits_total
+
+        # Pre-tax 401k/457 contributions reduce taxable ordinary income.
+        pretax_employee_contrib = 0.0
+        for spec in balance_specs:
+            if spec.behavior == "stochastic_market" and spec.tax_type == "pre_tax":
+                emp, _match = plan.get(spec.name, (0.0, 0.0))
+                pretax_employee_contrib += emp
+
+        # Snapshot post-RMD scratch state so we can iterate cash_need <->
+        # withdraw <-> tax until tax converges. RMD is independent of tax
+        # (depends only on jan1 balance), so we don't redo it.
+        balances_snapshot = state.balances[:, t, :].copy()
+        withdrawals_snapshot = state.withdrawals[:, t, :].copy()
+        basis_snapshot = state.cost_basis_brokerage[:, t].copy()
+
+        # 5. Iterate cash_need / withdraw / tax to convergence.
+        # Initial guess: zero income tax (cash_need only covers expenses).
+        # Each iteration: (a) compute cash_need including current tax estimate,
+        # (b) withdraw to cover, (c) recompute tax from realized withdrawals,
+        # (d) compare to previous estimate. Converges geometrically because
+        # each $1 of additional pretax withdrawal adds only ~marginal-rate
+        # extra tax (< $1).
         fixed_income = salary + pension + ss
-        # Cash need: expenses + employee-paid contributions (employer match
-        # comes from outside the household checkbook).
         employee_outflow = sum(emp for emp, _m in plan.values())
-        cash_need = total_expenses + employee_outflow - fixed_income
-        cash_need = np.maximum(0.0, cash_need)
-        cash_need_arr = np.full(nr, cash_need, dtype=np.float64)
-        # Subtract RMD already taken (it's cash in hand)
-        net_need = np.maximum(0.0, cash_need_arr - rmd_per_run)
-        ordinary_drawn, ltcg_drawn, _unmet = withdraw_for_need(
-            state, t, net_need, classification
+        nontax_cash_need = (
+            total_expenses + employee_outflow + pretax_benefits_total - fixed_income
+        )
+        # nontax_cash_need is a scalar; tax_estimate is per-run.
+        tax_estimate = np.zeros(nr, dtype=np.float64)
+        ordinary_drawn = np.zeros(nr, dtype=np.float64)
+        ltcg_drawn = np.zeros(nr, dtype=np.float64)
+        result = None
+        deferred_in = state.deferred_state_credit[:, t]
+        max_iter = 25
+        for it in range(max_iter):
+            # Restore the post-RMD baseline before re-running withdrawals.
+            state.balances[:, t, :] = balances_snapshot
+            state.withdrawals[:, t, :] = withdrawals_snapshot
+            state.cost_basis_brokerage[:, t] = basis_snapshot
+
+            cash_need = np.maximum(0.0, nontax_cash_need + tax_estimate)
+            net_need = np.maximum(0.0, cash_need - rmd_per_run)
+            ordinary_drawn, ltcg_drawn, _unmet = withdraw_for_need(
+                state, t, net_need, classification
+            )
+
+            ordinary_income = np.maximum(
+                0.0,
+                salary + pension + ss + ordinary_drawn + rmd_per_run
+                - pretax_employee_contrib - pretax_benefits_total,
+            )
+            result = tax_engine.compute_taxes(
+                scenario,
+                sim_year=sim_year,
+                ordinary_income=ordinary_income,
+                ltcg_income=ltcg_drawn,
+                deferred_state_credit_in=deferred_in,
+                contributed_to_529_this_year=contributed_529_arr,
+            )
+            new_tax = result.total
+            if np.max(np.abs(new_tax - tax_estimate)) < 1.0:
+                tax_estimate = new_tax
+                state.tax_iterations[t] = it + 1
+                break
+            tax_estimate = new_tax
+        else:
+            state.tax_iterations[t] = max_iter
+
+        ltcg_income = ltcg_drawn
+        ordinary_income = np.maximum(
+            0.0,
+            salary + pension + ss + ordinary_drawn + rmd_per_run
+            - pretax_employee_contrib - pretax_benefits_total,
         )
 
         # Track Brokerage cost basis: total inflow (employee + employer match)
@@ -326,34 +395,13 @@ def run_simulation(scenario: Scenario) -> Results:
             state.cost_basis_brokerage[:, t], next_brokerage_balance
         )
 
-        # 7. Aggregate income & taxes
-        ordinary_income = (
-            salary + pension + ss + ordinary_drawn + rmd_per_run
-        )
-        # 401k/457 *employee* pre-tax contributions reduce taxable ordinary income.
-        pretax_employee_contrib = 0.0
-        for spec in balance_specs:
-            if spec.behavior == "stochastic_market" and spec.tax_type == "pre_tax":
-                emp, _match = plan.get(spec.name, (0.0, 0.0))
-                pretax_employee_contrib += emp
-        ordinary_income = np.maximum(0.0, ordinary_income - pretax_employee_contrib)
-        ltcg_income = ltcg_drawn
-
+        # 7. Record final per-year aggregates.
         state.gross_income[:, t] = salary + pension + ss + ordinary_drawn + rmd_per_run + ltcg_drawn
         state.taxable_income[:, t] = ordinary_income + ltcg_income
         state.ltcg_income[:, t] = ltcg_income
         state.pension_income[:, t] = pension
         state.ss_income[:, t] = ss
 
-        deferred_in = state.deferred_state_credit[:, t]
-        result = tax_engine.compute_taxes(
-            scenario,
-            sim_year=sim_year,
-            ordinary_income=ordinary_income,
-            ltcg_income=ltcg_income,
-            deferred_state_credit_in=deferred_in,
-            contributed_to_529_this_year=contributed_529_arr,
-        )
         state.tax_paid[:, t] = result.total + property_tax
         state.tax_breakdown["federal"][:, t] = result.federal
         state.tax_breakdown["oregon"][:, t] = result.oregon

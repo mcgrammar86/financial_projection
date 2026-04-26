@@ -46,6 +46,22 @@ def salary_for_year(person: Person, sim_year: int) -> float:
     return person.salary_2026 * (1.0 + person.salary_growth) ** years_from_2026
 
 
+def pretax_benefits_for_year(person: Person, sim_year: int) -> float:
+    """Per-person pre-tax payroll deductions (health insurance, FSA, etc.).
+
+    These reduce taxable ordinary income AND reduce take-home cash. By
+    default each benefit stops at the person's retirement_year.
+    """
+    if not person.pretax_benefits:
+        return 0.0
+    total = 0.0
+    for benefit in person.pretax_benefits:
+        if benefit.stops_at_retirement and sim_year >= person.retirement_year:
+            continue
+        total += benefit.amount_2026 * (1.0 + benefit.growth) ** (sim_year - 2026)
+    return total
+
+
 def healthcare_for_year(scenario: Scenario, sim_year: int) -> float:
     bridge = 0.0
     medicare = 0.0

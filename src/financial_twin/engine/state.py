@@ -41,6 +41,8 @@ class SimState:
     expenses: np.ndarray = field(init=False)
     pension_income: np.ndarray = field(init=False)
     ss_income: np.ndarray = field(init=False)
+    pretax_benefits: np.ndarray = field(init=False)  # [n_runs, n_years] (deterministic)
+    tax_iterations: np.ndarray = field(init=False)  # [n_years] convergence count
 
     returns_draw: np.ndarray = field(init=False)  # [n_runs, n_years, 2]
     cost_basis_brokerage: np.ndarray = field(init=False)  # [n_runs, n_years+1]
@@ -73,6 +75,8 @@ class SimState:
         self.expenses = np.zeros((nr, ny), dtype=np.float64)
         self.pension_income = np.zeros((nr, ny), dtype=np.float64)
         self.ss_income = np.zeros((nr, ny), dtype=np.float64)
+        self.pretax_benefits = np.zeros((nr, ny), dtype=np.float64)
+        self.tax_iterations = np.zeros(ny, dtype=np.int32)
         self.returns_draw = np.zeros((nr, ny, 2), dtype=np.float64)
         self.cost_basis_brokerage = np.zeros((nr, ny + 1), dtype=np.float64)
         self.deferred_state_credit = np.zeros((nr, ny + 1), dtype=np.float64)
