@@ -14,6 +14,13 @@ import polars as pl
 import streamlit as st
 
 from financial_twin.config.loader import load_yaml
+from financial_twin.engine.cashflow import (
+    compute_cashflow_year,
+    planned_529_withdrawals,
+    salary_for_year,
+)
+from financial_twin.engine.mortgage import amortize
+from financial_twin.engine.withdrawals import classify_accounts
 from financial_twin.simulate import results as result_mod
 from financial_twin.dashboard import cache, charts
 
@@ -22,6 +29,121 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/sample.yaml")
     return parser.parse_args()
+
+
+def _build_cashflow_table(scenario, results, percentile: int) -> pl.DataFrame:
+    """One row per simulated year, all cashflow categories side-by-side.
+
+    Deterministic columns (salary, pension, SS, expenses, mortgage,
+    property tax, 529 withdrawals) are the same across all runs.
+    Stochastic columns (drawdowns, taxes) are taken at the requested
+    percentile across runs.
+
+    The Surplus/Gap column reconciles money in vs money out:
+      In  = Salary + Pension + SS + Drawn (pretax) + Drawn (taxable) + Drawn (Roth/HSA)
+      Out = Standard + Discretionary + Healthcare + Mortgage + PropertyTax
+            + Federal + Oregon + MetroSHS + EmployeeContribs
+      Surplus = In - Out
+    A persistently positive Surplus means cash that the engine doesn't
+    route anywhere (no auto-savings); a negative Surplus that doesn't
+    show up as additional withdrawals means tax obligations aren't
+    being funded by the cashflow loop.
+    """
+    state = results.state
+    ny = scenario.n_years
+    start_year = scenario.simulation.start_year
+    sim_years = np.arange(start_year, start_year + ny)
+
+    mortgage = amortize(scenario.mortgage, start_year=start_year, n_years=ny)
+    classification = classify_accounts(scenario, results.account_idx_map)
+
+    # --- Income (deterministic) ---
+    salary = np.array(
+        [sum(salary_for_year(p, start_year + t) for p in scenario.people) for t in range(ny)],
+        dtype=np.float64,
+    )
+    pension = np.array(
+        [sum(stream[t] for stream in results.pension_streams.values()) for t in range(ny)],
+        dtype=np.float64,
+    )
+    ss = np.array(
+        [sum(stream[t] for stream in results.ss_streams.values()) for t in range(ny)],
+        dtype=np.float64,
+    )
+
+    # --- Withdrawals split by tax tier (stochastic across runs) ---
+    def _pct_sum(idxs: list[int]) -> np.ndarray:
+        if not idxs:
+            return np.zeros(ny, dtype=np.float64)
+        per_run_per_year = state.withdrawals[:, :, idxs].sum(axis=2)  # [n_runs, ny]
+        return np.percentile(per_run_per_year, percentile, axis=0)
+
+    pretax_drawn = _pct_sum(classification.pretax_idx)
+    brokerage_drawn = _pct_sum(classification.brokerage_idx)
+    roth_drawn = _pct_sum(classification.roth_or_hsa_idx)
+
+    # --- Expenses + mortgage (deterministic) ---
+    standard = np.zeros(ny, dtype=np.float64)
+    discretionary = np.zeros(ny, dtype=np.float64)
+    healthcare = np.zeros(ny, dtype=np.float64)
+    mortgage_pi = np.zeros(ny, dtype=np.float64)
+    lifestyle_split = np.zeros(ny, dtype=np.float64)
+    for t in range(ny):
+        cf = compute_cashflow_year(scenario, start_year + t, mortgage, year_index=t)
+        standard[t] = cf.standard_expenses
+        discretionary[t] = cf.discretionary_expenses
+        healthcare[t] = cf.healthcare_expense
+        mortgage_pi[t] = cf.mortgage_p_and_i
+        lifestyle_split[t] = cf.lifestyle_split_brokerage_contrib
+
+    # --- Taxes (stochastic except property which is deterministic) ---
+    federal = np.percentile(state.tax_breakdown["federal"], percentile, axis=0)
+    oregon = np.percentile(state.tax_breakdown["oregon"], percentile, axis=0)
+    shs = np.percentile(state.tax_breakdown["metro_shs"], percentile, axis=0)
+    property_tax = np.percentile(state.tax_breakdown["property"], percentile, axis=0)
+
+    # --- Contributions (sum across all accounts) ---
+    employee = np.percentile(state.contributions.sum(axis=2), percentile, axis=0)
+    match = np.percentile(state.employer_match.sum(axis=2), percentile, axis=0)
+
+    # --- 529 outflows (deterministic) ---
+    w529 = np.zeros(ny, dtype=np.float64)
+    for t in range(ny):
+        for _, amt in planned_529_withdrawals(scenario, start_year + t).items():
+            w529[t] += amt
+
+    # --- Reconciliation ---
+    income_in = salary + pension + ss + pretax_drawn + brokerage_drawn + roth_drawn
+    cash_out = (
+        standard + discretionary + healthcare + mortgage_pi + property_tax
+        + federal + oregon + shs
+        + employee
+    )
+    surplus = income_in - cash_out
+
+    return pl.DataFrame({
+        "Year": sim_years,
+        "Salary": salary,
+        "Pension": pension,
+        "SocSec": ss,
+        "Drawn pretax": pretax_drawn,
+        "Drawn taxable": brokerage_drawn,
+        "Drawn roth/HSA": roth_drawn,
+        "Income IN": income_in,
+        "Standard exp": standard,
+        "Discretionary": discretionary,
+        "Healthcare": healthcare,
+        "Mortgage P&I": mortgage_pi,
+        "Property tax": property_tax,
+        "Federal tax": federal,
+        "Oregon tax": oregon,
+        "Metro SHS": shs,
+        "Employee contrib": employee,
+        "Employer match": match,
+        "529 outflow": w529,
+        "Cash OUT": cash_out,
+        "Surplus (IN-OUT)": surplus,
+    })
 
 
 def main() -> None:
@@ -35,7 +157,9 @@ def main() -> None:
 
     results = cache.cached_run(scenario)
 
-    overview_tab, balances_tab = st.tabs(["Overview", "Account balances"])
+    overview_tab, balances_tab, cashflow_tab = st.tabs(
+        ["Overview", "Account balances", "Yearly cashflow"]
+    )
 
     with overview_tab:
         sim_year = st.slider(
@@ -146,6 +270,109 @@ def main() -> None:
             "across runs computed independently, so Start + Employee + Match "
             "− Withdrawal + Growth may not exactly equal End for any single "
             "Monte Carlo path."
+        )
+
+    with cashflow_tab:
+        _render_cashflow_tab(scenario, results)
+
+
+def _render_cashflow_tab(scenario, results) -> None:
+    percentile = st.select_slider(
+        "Percentile across runs",
+        options=[10, 25, 50, 75, 90],
+        value=50,
+        key="cashflow_percentile",
+        help="P50 = median across the Monte Carlo runs. Salary, pension, "
+        "SS, expenses, mortgage, property tax, and 529 outflows are "
+        "deterministic; withdrawals and income taxes vary by run.",
+    )
+    df = _build_cashflow_table(scenario, results, percentile)
+
+    st.subheader(f"Year-by-year cashflow (P{percentile})")
+    money_cols = [c for c in df.columns if c != "Year"]
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            c: st.column_config.NumberColumn(format="$%.0f") for c in money_cols
+        },
+    )
+
+    # Single-year deep dive: vertical breakdown for the selected year.
+    st.subheader("Single-year deep dive")
+    pick = st.slider(
+        "Year",
+        scenario.simulation.start_year,
+        scenario.simulation.end_year - 1,
+        scenario.simulation.start_year,
+        key="cashflow_year_pick",
+    )
+    row = df.filter(pl.col("Year") == pick).row(0, named=True)
+
+    def _section(title: str, items: list[tuple[str, float]]) -> None:
+        st.markdown(f"**{title}**")
+        section_df = pl.DataFrame({
+            "Item": [k for k, _ in items],
+            "Amount": [v for _, v in items],
+        })
+        total = sum(v for _, v in items)
+        section_df = section_df.vstack(pl.DataFrame({"Item": [f"{title} total"], "Amount": [total]}))
+        st.dataframe(
+            section_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Amount": st.column_config.NumberColumn(format="$%.0f")},
+        )
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        _section("Income IN", [
+            ("Salary", row["Salary"]),
+            ("Pension", row["Pension"]),
+            ("Social Security", row["SocSec"]),
+            ("Drawn from pretax", row["Drawn pretax"]),
+            ("Drawn from taxable (HYSA + brokerage)", row["Drawn taxable"]),
+            ("Drawn from Roth/HSA", row["Drawn roth/HSA"]),
+        ])
+        _section("Living expenses", [
+            ("Standard", row["Standard exp"]),
+            ("Discretionary", row["Discretionary"]),
+            ("Healthcare", row["Healthcare"]),
+            ("Mortgage P&I", row["Mortgage P&I"]),
+            ("Property tax", row["Property tax"]),
+        ])
+    with col_right:
+        _section("Income taxes", [
+            ("Federal", row["Federal tax"]),
+            ("Oregon", row["Oregon tax"]),
+            ("Metro SHS", row["Metro SHS"]),
+        ])
+        _section("Investments / outflows", [
+            ("Employee contributions (sum)", row["Employee contrib"]),
+            ("Employer match (sum)", row["Employer match"]),
+            ("529 tuition outflow", row["529 outflow"]),
+        ])
+
+    surplus = row["Surplus (IN-OUT)"]
+    color = "green" if abs(surplus) < 1.0 else ("red" if surplus < 0 else "orange")
+    st.markdown(
+        f"**Reconciliation for {pick}:** "
+        f"Income IN ${row['Income IN']:,.0f}  −  Cash OUT ${row['Cash OUT']:,.0f}  "
+        f"= :{color}[**${surplus:,.0f} surplus**]"
+    )
+    if surplus > 1.0:
+        st.warning(
+            "Positive surplus = pre-tax cash that the engine doesn't route "
+            "anywhere. The household effectively spends/loses it. To capture "
+            "it, increase planned contributions or add a brokerage savings line."
+        )
+    elif surplus < -1.0:
+        st.warning(
+            "Negative surplus that doesn't show up as additional withdrawals "
+            "means tax obligations aren't fully funded by the cashflow loop. "
+            "(The engine's cash_need calculation includes property tax but not "
+            "income taxes — they're computed and recorded but not deducted.)"
         )
 
 
