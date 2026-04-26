@@ -47,7 +47,11 @@ def _fixed_deferred(state: SimState, year: int, ctx: AccountContext) -> None:
     """
     spec: FixedDeferredAccount = ctx.spec  # type: ignore[assignment]
     jan1 = state.balances[:, year, ctx.idx]
-    contrib = state.contributions[:, year, ctx.idx]
+    # Total inflow = employee contribution + employer match.
+    contrib = (
+        state.contributions[:, year, ctx.idx]
+        + state.employer_match[:, year, ctx.idx]
+    )
     rate = spec.annual_rate
     if spec.interest_on_jan1_only:
         interest = jan1 * rate
@@ -75,7 +79,11 @@ def _stochastic_market(state: SimState, year: int, ctx: AccountContext) -> None:
         weight = spec.stocks_weight
     r = blend_account_return(market, weight)
     jan1 = state.balances[:, year, ctx.idx]
-    contrib = state.contributions[:, year, ctx.idx]
+    # Total inflow = employee contribution + employer match.
+    contrib = (
+        state.contributions[:, year, ctx.idx]
+        + state.employer_match[:, year, ctx.idx]
+    )
     # Mid-year contribution convention: contributions earn half a year of return.
     growth = jan1 * r + contrib * (r * 0.5)
     state.growth[:, year, ctx.idx] = growth
@@ -95,7 +103,12 @@ def _education_529_glidepath(state: SimState, year: int, ctx: AccountContext) ->
         + (1.0 - fraction_aggressive) * spec.glide_conservative_rate
     )
     jan1 = state.balances[:, year, ctx.idx]
-    contrib = state.contributions[:, year, ctx.idx]
+    # Total inflow = employee contribution + employer match (529 plans rarely
+    # have employer match but support it for symmetry).
+    contrib = (
+        state.contributions[:, year, ctx.idx]
+        + state.employer_match[:, year, ctx.idx]
+    )
     withdraw = state.withdrawals[:, year, ctx.idx]
     growth = jan1 * rate + contrib * (rate * 0.5)
     state.growth[:, year, ctx.idx] = growth

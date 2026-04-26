@@ -82,6 +82,7 @@ class Results:
                 "account": [names[i] for i in acc_idx],
                 "balance": end_bal.reshape(-1),
                 "contribution": self.state.contributions.reshape(-1),
+                "employer_match": self.state.employer_match.reshape(-1),
                 "withdrawal": self.state.withdrawals.reshape(-1),
                 "growth": self.state.growth.reshape(-1),
             }
@@ -265,7 +266,8 @@ def run_simulation(scenario: Scenario) -> Results:
             idx = account_idx_map.get(name)
             if idx is None:
                 continue
-            state.contributions[:, t, idx] = employee + match
+            state.contributions[:, t, idx] = employee
+            state.employer_match[:, t, idx] = match
 
         # 529 withdrawals (deterministic)
         for name, amount in planned_529_withdrawals(scenario, sim_year).items():
@@ -298,12 +300,15 @@ def run_simulation(scenario: Scenario) -> Results:
             state, t, net_need, classification
         )
 
-        # Track Brokerage cost basis: contributions add to basis;
-        # withdrawal handling already deducted basis_consumed in withdraw_for_need.
+        # Track Brokerage cost basis: total inflow (employee + employer match)
+        # adds to basis; withdrawal handling already deducted basis_consumed
+        # in withdraw_for_need.
         for spec in balance_specs:
             if spec.behavior == "stochastic_market" and spec.tax_type == "taxable":
                 idx = account_idx_map[spec.name]
-                state.cost_basis_brokerage[:, t] += state.contributions[:, t, idx]
+                state.cost_basis_brokerage[:, t] += (
+                    state.contributions[:, t, idx] + state.employer_match[:, t, idx]
+                )
 
         # 6. Apply growth (after withdrawals/RMD) — balances[:,t+1,...] = ...
         step_accounts(state, t, contexts)

@@ -118,13 +118,15 @@ def main() -> None:
         cidx = names_by_idx.index(chosen)
         starts = np.percentile(history[:, :-1, cidx], percentile, axis=0)
         ends = np.percentile(history[:, 1:, cidx], percentile, axis=0)
-        contribs = np.percentile(results.state.contributions[:, :, cidx], percentile, axis=0)
+        employee = np.percentile(results.state.contributions[:, :, cidx], percentile, axis=0)
+        match = np.percentile(results.state.employer_match[:, :, cidx], percentile, axis=0)
         withdraws = np.percentile(results.state.withdrawals[:, :, cidx], percentile, axis=0)
         growths = np.percentile(results.state.growth[:, :, cidx], percentile, axis=0)
         activity = pl.DataFrame({
             "Year": end_years,
             "Start balance": starts,
-            "Contribution": contribs,
+            "Employee contrib": employee,
+            "Employer match": match,
             "Withdrawal": withdraws,
             "Growth": growths,
             "End balance": ends,
@@ -138,9 +140,12 @@ def main() -> None:
             },
         )
         st.caption(
-            "Note: each column is the per-year P-percentile across runs computed "
-            "independently, so Start + Contribution − Withdrawal + Growth may not "
-            "exactly equal End for any single Monte Carlo path."
+            "Employee contrib = exactly what you set as `contribution_2026` "
+            "(inflated each year); Employer match is computed from "
+            "salary × match_pct. Each column is the per-year P-percentile "
+            "across runs computed independently, so Start + Employee + Match "
+            "− Withdrawal + Growth may not exactly equal End for any single "
+            "Monte Carlo path."
         )
 
 

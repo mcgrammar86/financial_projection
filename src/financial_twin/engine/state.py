@@ -29,6 +29,7 @@ class SimState:
     initial_balances: np.ndarray = field(init=False)  # [n_runs, n_accounts]
     eoy_balances: np.ndarray = field(init=False)  # [n_runs, n_years, n_accounts]
     contributions: np.ndarray = field(init=False)
+    employer_match: np.ndarray = field(init=False)
     withdrawals: np.ndarray = field(init=False)
     growth: np.ndarray = field(init=False)
 
@@ -55,6 +56,7 @@ class SimState:
         self.initial_balances = np.zeros((nr, na), dtype=np.float64)
         self.eoy_balances = np.zeros((nr, ny, na), dtype=np.float64)
         self.contributions = np.zeros((nr, ny, na), dtype=np.float64)
+        self.employer_match = np.zeros((nr, ny, na), dtype=np.float64)
         self.withdrawals = np.zeros((nr, ny, na), dtype=np.float64)
         self.growth = np.zeros((nr, ny, na), dtype=np.float64)
         self.gross_income = np.zeros((nr, ny), dtype=np.float64)

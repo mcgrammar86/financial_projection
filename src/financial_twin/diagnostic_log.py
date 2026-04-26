@@ -121,8 +121,8 @@ def _dump_year(scenario: Scenario, results, mortgage, t: int, out: TextIO) -> No
     history = results.balance_history()
     print("\n[Per-account activity (single deterministic run)]", file=out)
     print(
-        f"  {'Account':30s} {'Start':>15s} {'Contrib':>15s} {'Withdraw':>15s} "
-        f"{'Growth':>15s} {'End':>15s}    [check S+C-W+G-E]",
+        f"  {'Account':30s} {'Start':>14s} {'Employee':>12s} {'Match':>10s} "
+        f"{'Withdraw':>12s} {'Growth':>12s} {'End':>14s}   [check]",
         file=out,
     )
     for spec in scenario.accounts:
@@ -130,14 +130,15 @@ def _dump_year(scenario: Scenario, results, mortgage, t: int, out: TextIO) -> No
             continue
         idx = results.account_idx_map[spec.name]
         start = float(history[0, t, idx])
-        contrib = float(state.contributions[0, t, idx])
+        employee = float(state.contributions[0, t, idx])
+        match = float(state.employer_match[0, t, idx])
         withdraw = float(state.withdrawals[0, t, idx])
         growth = float(state.growth[0, t, idx])
         end = float(history[0, t + 1, idx])
-        check = start + contrib - withdraw + growth - end
+        check = start + employee + match - withdraw + growth - end
         print(
-            f"  {spec.name:30s} {start:>15,.2f} {contrib:>15,.2f} {withdraw:>15,.2f} "
-            f"{growth:>15,.2f} {end:>15,.2f}    [{check:>+9,.2f}]",
+            f"  {spec.name:30s} {start:>14,.2f} {employee:>12,.2f} {match:>10,.2f} "
+            f"{withdraw:>12,.2f} {growth:>12,.2f} {end:>14,.2f}   [{check:>+8,.2f}]",
             file=out,
         )
 
