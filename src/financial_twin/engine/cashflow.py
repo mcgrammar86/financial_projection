@@ -69,17 +69,29 @@ def healthcare_for_year(scenario: Scenario, sim_year: int) -> float:
     base_factor = (1.0 + inflation) ** (sim_year - 2026)
     bridge_per = scenario.healthcare.bridge_annual_premium_2026 * base_factor
     medicare_per = scenario.healthcare.medicare_supplement_annual_2026 * base_factor
+
+    # Per-person bridge/Medicare (only after retirement; switches at 65).
+    living_count = 0
     for person in scenario.people:
+        if person.death_year is not None and sim_year >= person.death_year:
+            continue
+        living_count += 1
         if sim_year < person.retirement_year:
             continue
         age = sim_year - person.birth_year
-        if person.death_year is not None and sim_year >= person.death_year:
-            continue
         if age < 65:
             bridge += bridge_per
         else:
             medicare += medicare_per
-    return bridge + medicare
+
+    # Household out-of-pocket: every year (working or retired) until the
+    # household empties out. Uses healthcare-specific inflation, not CPI.
+    oop_factor = (1.0 + scenario.healthcare.out_of_pocket_growth) ** (sim_year - 2026)
+    oop = scenario.healthcare.out_of_pocket_annual_2026 * oop_factor
+    if living_count == 0:
+        oop = 0.0
+
+    return bridge + medicare + oop
 
 
 def compute_cashflow_year(

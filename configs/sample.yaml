@@ -213,8 +213,15 @@ expenses:
   discretionary_annual_2026: 12000.0   # TODO
 
 healthcare:
-  bridge_annual_premium_2026: 18000.0  # TODO: ACA premium between retirement and 65
-  medicare_supplement_annual_2026: 6000.0  # TODO: post-65 supplement + Part B
+  # Bridge premium: applies only between retirement_year and age 65, per person.
+  bridge_annual_premium_2026: 18000.0      # TODO
+  # Medicare supplement + Part B: applies after age 65, per person.
+  medicare_supplement_annual_2026: 6000.0  # TODO
+  # Out-of-pocket healthcare paid every year (working AND retired):
+  # deductibles, copays, prescriptions, vision/dental not covered, etc.
+  # Inflated at out_of_pocket_growth (healthcare-specific, not CPI).
+  out_of_pocket_annual_2026: 4000.0        # TODO
+  out_of_pocket_growth: 0.06               # 6% healthcare inflation
 
 tax:
   filing_status: mfj

@@ -171,8 +171,14 @@ class TaxSpec(BaseModel):
 
 class HealthcareSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    bridge_annual_premium_2026: float = 0.0  # ACA-bridge expense pre-65
-    medicare_supplement_annual_2026: float = 0.0  # post-65
+    bridge_annual_premium_2026: float = 0.0  # ACA-bridge expense pre-65 (post-retirement only)
+    medicare_supplement_annual_2026: float = 0.0  # post-65 supplement + Part B
+    # Out-of-pocket healthcare that applies EVERY year regardless of
+    # retirement/age: deductibles, co-pays, prescriptions, dental/vision
+    # not covered by insurance, etc. Inflated at the healthcare-specific
+    # growth rate (default 5%) rather than general CPI.
+    out_of_pocket_annual_2026: float = 0.0
+    out_of_pocket_growth: float = 0.05
 
 
 class ExpensesSpec(BaseModel):
