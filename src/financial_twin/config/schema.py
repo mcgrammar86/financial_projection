@@ -78,9 +78,18 @@ class StochasticAccount(BaseModel):
     tax_type: TaxType
     contribution_limit_2026: float
     contribution_2026: float = 0.0
+    # Optional employee contribution as a fraction of owner's salary
+    # (e.g. 0.06 = "6% of my pay goes to my 401k"). Added to contribution_2026;
+    # the combined total is capped at the IRS limit.
+    contribution_pct: float = Field(0.0, ge=0.0, le=1.0)
     employer_match_2026: float = 0.0  # flat $ match (used when employer_match_pct == 0)
     employer_match_pct: float = 0.0  # match expressed as fraction of owner's salary
     employer_match_max_pct: float = 0.0  # optional cap on % of salary that gets matched
+    # Non-elective employer contribution as a fraction of owner's salary,
+    # paid every working year regardless of what the employee contributes
+    # (e.g. 0.06 = "my employer puts an additional 6% in"). This is *added*
+    # to whatever the matching logic produces.
+    employer_contribution_pct: float = Field(0.0, ge=0.0, le=1.0)
     vehicle_group: str | None = None  # accounts in the same group share an IRS limit
     stocks_weight: float = Field(0.7, ge=0.0, le=1.0)  # initial / static weight
     # Target-date glide path: when both glide fields are set, the engine
@@ -245,8 +254,10 @@ class Scenario(BaseModel):
         """Stochastic accounts in the same `vehicle_group` share an IRS cap.
 
         All members must declare the same `contribution_limit_2026`, and the
-        sum of `contribution_2026` across the group must not exceed it.
-        Employer match is excluded from the participant cap.
+        combined planned employee contribution -- ``contribution_2026`` plus
+        ``contribution_pct * owner.salary_2026`` -- across the group must not
+        exceed it. Employer match / non-elective employer contributions are
+        excluded from the participant cap.
         """
         groups: dict[str, list[StochasticAccount]] = {}
         for spec in self.accounts:
@@ -256,6 +267,7 @@ class Scenario(BaseModel):
             if spec.vehicle_group is None:
                 continue
             groups.setdefault(spec.vehicle_group, []).append(spec)
+        person_by_name = {p.name: p for p in self.people}
         for group_name, members in groups.items():
             limits = {m.contribution_limit_2026 for m in members}
             if len(limits) > 1:
@@ -264,13 +276,19 @@ class Scenario(BaseModel):
                     f"contribution_limit_2026 values {sorted(limits)}; they must match."
                 )
             limit = next(iter(limits))
-            total = sum(m.contribution_2026 for m in members)
+            total = 0.0
+            for m in members:
+                total += m.contribution_2026
+                if m.contribution_pct > 0.0:
+                    owner = person_by_name.get(m.owner)
+                    if owner is not None:
+                        total += owner.salary_2026 * m.contribution_pct
             if total > limit + 1e-9:
                 names = ", ".join(m.name for m in members)
                 raise ValueError(
-                    f"vehicle_group '{group_name}': combined contribution_2026 "
-                    f"({total:.2f}) exceeds shared IRS limit ({limit:.2f}) "
-                    f"across [{names}]."
+                    f"vehicle_group '{group_name}': combined planned employee "
+                    f"contribution ({total:.2f}) exceeds shared IRS limit "
+                    f"({limit:.2f}) across [{names}]."
                 )
         return self
 

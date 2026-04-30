@@ -147,9 +147,11 @@ def planned_contributions(
                 contribs[spec.name] = (0.0, 0.0)
                 continue
             cap = spec.contribution_limit_2026 * factor
-            planned = min(spec.contribution_2026 * factor, cap)
+            owner_salary = salary_for_year(owner, sim_year)
+            # Employee contribution = flat dollar (inflated) + % of current salary.
+            planned_raw = spec.contribution_2026 * factor + owner_salary * spec.contribution_pct
+            planned = min(planned_raw, cap)
             if spec.employer_match_pct > 0.0:
-                owner_salary = salary_for_year(owner, sim_year)
                 cap_pct = (
                     spec.employer_match_max_pct
                     if spec.employer_match_max_pct > 0.0
@@ -162,6 +164,9 @@ def planned_contributions(
                 match = owner_salary * effective_pct
             else:
                 match = spec.employer_match_2026 * factor
+            # Non-elective employer contribution: paid every working year
+            # regardless of what the employee contributes.
+            match += owner_salary * spec.employer_contribution_pct
             contribs[spec.name] = (planned, match)
         elif spec.behavior == "fixed_deferred":
             assert isinstance(spec, FixedDeferredAccount)
